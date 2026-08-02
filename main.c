@@ -26,14 +26,11 @@ void SigHandler(int sig){
 }
 
 void SetupSignals(void){
-  sigset_t sigset;
-  sigemptyset(&sigset);
   struct sigaction sigact = { 
     .sa_handler = SigHandler,
-    .sa_sigaction = NULL,
-    .sa_mask = sigset,
     .sa_flags = 0,
   };
+  sigemptyset(&sigact.sa_mask);
   sigaction(SIGTERM,&sigact,NULL);
   sigaction(SIGINT,&sigact,NULL);
 }
