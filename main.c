@@ -7,49 +7,84 @@
 #define MAX_EV 32
 #define TIMEOUT 2000
 #define PERR(msg) do {\
-                    fprintf(stderr, "%s:%d:%s:%s: %s\n", __FILE__, __LINE__, __func__, msg, strerror(errno));\
+                    fprintf(stderr, "ERROR - %s:%d:%s:%s: %s\n", __FILE__, __LINE__, __func__, msg, strerror(errno));\
 	          } while (0)
 #define ERR(msg) do {\
-                    fprintf(stderr, "%s:%d:%s: %s\n", __FILE__, __LINE__, __func__, msg);\
+                    fprintf(stderr, "ERROR - %s:%d:%s: %s\n", __FILE__, __LINE__, __func__, msg);\
+	          } while (0)		  
+#define WARN(msg) do {\
+                    fprintf(stdout, "WARNING - %s: %s\n", __func__, msg);\
+	          } while (0)		  
+#define INFO(msg) do {\
+                    fprintf(stdout, "INFO - %s: %s\n", __func__, msg);\
 	          } while (0)
 		  
-volatile sig_atomic_t sigterm = 0;
+volatile sig_atomic_t STOP = 0;
 
-void sigint_handler(int sig){
-  (void)sig;
-  sigterm = 1;
+void SigHandler(int sig){
+  STOP = 1;
 }
 
-int Init(int epfd);
-int Healthcheck(int epfd);
-int Func(int epfd);
-void CleanUp(int epfd);
+void SetupSignals(void){
+  sigset_t sigset;
+  sigemptyset(&sigset);
+  struct sigaction sigact = { 
+    .sa_handler = SigHandler,
+    .sa_sigaction = NULL,
+    .sa_mask = sigset,
+    .sa_flags = 0,
+  };
+  sigaction(SIGTERM,&sigact,NULL);
+  sigaction(SIGINT,&sigact,NULL);
+}
+
+int Init(int epfd){
+  INFO("Initialization complete");
+  return 0;
+}
+
+int PeriodicTasks(int epfd){
+  INFO("Someday, whatever will be here");
+  return 0;
+}
+
+int Run(int epfd, struct epoll_event *events, int n){
+  INFO("Working...");
+  return 0;
+}
+
+void CleanUp(int epfd){
+  INFO("The program is successfuly terminated");
+}
 
 int main(void){
+  SetupSignals();
   int epfd = epoll_create(MAX_EV);
   if(epfd == -1){
-    PERR("epoll_create");
+    PERR("epoll_create()");
     return epfd;
   }
   if(Init(epfd) != 0){
-    ERR("Healthcheck");
+    ERR("Init()");
   }
   struct epoll_event out_ev[MAX_EV];
-  while(!sigterm){
+  while(!STOP){
     int n = epoll_wait(epfd, out_ev, MAX_EV, TIMEOUT);
     if(n == -1){
-      PERR("epoll_wait");
+      if (errno == EINTR) /* if sigterm */
+        continue;
+      PERR("epoll_wait()");
       break;
     }
     if(n == 0){
-      if(Healthcheck(epfd) != 0){
-        ERR("Healthcheck");
+      if(PeriodicTasks(epfd) != 0){
+        ERR("PeriodicTasks()");
       }
       continue;
     }
     if(n > 0){
-      if(Func(epfd) != 0){
-        ERR("Func");
+      if(Run(epfd, out_ev, n) != 0){
+        ERR("Run()");
       }
       continue;
     }
