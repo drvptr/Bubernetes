@@ -1,6 +1,8 @@
 #ifndef APISERVER_H
 #define APISERVER_H
 
+/*Local API*/
+
 /* opaque types */
 typedef struct res res_t;
 typedef struct resp resp_t;
@@ -16,6 +18,8 @@ res_t   *ResCreate(void);
 void     ResDelete(res_t *in);
 
 /* Response Methods */
+
+const void *RespGetValuePtr(resp_t *r);
 
 
 #endif

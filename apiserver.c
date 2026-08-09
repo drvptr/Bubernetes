@@ -11,3 +11,4 @@ struct res {
 };
 
 
+/* pointer-as-handle */

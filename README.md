@@ -1,5 +1,7 @@
 # Bubernetes
-
+---
+![logo](./logo.png)
+---
 > **Bare Metal Kubernetes** — a peer-to-peer distributed process orchestrator written in pure C.
 
 ## Overview
