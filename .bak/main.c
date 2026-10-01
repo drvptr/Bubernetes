@@ -4,6 +4,13 @@
 #include <signal.h>
 #include <sys/epoll.h>
 
+/* Maby, I'll move this strings to the another file, in future */
+#include <sys/types.h>
+#include <sys/socket.h>
+#if defined(__FreeBSD__)
+  #define AF_INET PF_INET
+#endif
+
 #define MAX_EV 32
 #define TIMEOUT 2000
 #define PERR(msg) do {\
@@ -36,6 +43,11 @@ void SetupSignals(void){
 }
 
 int Init(int epfd){
+  int swimfd = socket(AF_INET, SOCK_DGRAM, 0);
+  if (swimfd == -1) {
+    PERR("Init()");
+    return -1;
+  }
   INFO("Initialization complete");
   return 0;
 }

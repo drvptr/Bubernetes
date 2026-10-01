@@ -1,0 +1,8 @@
+# A daemonset, expressed as the same Deploy kind with replicas: -1 ("one on
+# every node"). Add a node and it gets a copy automatically; there is no
+# DaemonSet type, because the behaviour is just a value of replicas.
+kind: Deploy
+name: agent
+replicas: -1
+image: ./bin/workload
+argv: [--agent]

@@ -1,0 +1,7 @@
+# A single process pinned to the node whose manifest directory holds this file.
+# Static resources are never scheduled elsewhere - the analogue of a static pod -
+# so if that node is gone, so is this process (by design, not by accident).
+kind: Static
+name: logger
+image: ./bin/workload
+argv: [--local-logger]

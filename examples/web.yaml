@@ -1,0 +1,8 @@
+# A replicated workload. replicas: N means "N copies, spread across the cluster
+# by rendezvous hashing". Change N and the reconciler scales up or down; no
+# manifest surgery, no new kind.
+kind: Deploy
+name: web
+replicas: 3
+image: ./bin/workload
+argv: [--serve, web]

@@ -26,3 +26,91 @@ One of the key goals of Bubernetes is to separate process orchestration from the
 Bubernetes is designed around a flat cluster topology where the cluster itself is the smallest logical unit of topology. Nodes are equal peers rather than members of a hierarchy, and a node is identified by a logical name and a current network address. The name represents the node's identity within the cluster, while the address is only a way to reach it and may change without changing the node's logical identity. This also means that a physical or virtual machine can be replaced without necessarily replacing the logical node: as long as the new machine assumes the same node identity and has valid credentials, the cluster can continue treating it as the same node.
 
 Bubernetes does not require a built-in hierarchy of masters, workers, regions, zones, or sub-clusters. Higher-level topology can instead be implemented externally when needed. For example, several independent Bubernetes clusters could be connected through an external load balancer or another routing mechanism and treated as larger logical units. This makes the cluster itself a composable building block, allowing a cluster of clusters to be constructed without introducing topology-specific concepts into the core orchestration model.
+
+---
+
+## Building
+
+One static binary per command; no runtime dependencies, exactly like the
+workloads it runs.
+
+```sh
+make                 # bubelet + bubectl, static, cleartext transport
+make examples        # the sample static workload (examples/workload.c)
+make TLS=1           # node-to-node traffic over static mutual-auth TLS (OpenSSL)
+```
+
+Everything lands in `bin/`. The only external dependency is libc (and OpenSSL
+when `TLS=1`), both linked statically.
+
+## Running a local cluster
+
+Each node needs a name, a port (used for both SWIM/UDP and the TCP wire), and a
+manifest directory. Nodes after the first take a `--seed` to join.
+
+```sh
+make examples
+bin/bubelet --name n1 --port 7701 --manifests /tmp/n1 &
+bin/bubelet --name n2 --port 7702 --manifests /tmp/n2 --seed 127.0.0.1:7701 &
+bin/bubelet --name n3 --port 7703 --manifests /tmp/n3 --seed 127.0.0.1:7701 &
+
+bin/bubectl --server 127.0.0.1:7701 get nodes
+```
+
+Point an `image:` at the built workload (an absolute path, or one relative to
+where bubelet runs), then:
+
+```sh
+bin/bubectl --server 127.0.0.1:7701 apply -f examples/web.yaml    # replicas: 3
+bin/bubectl --server 127.0.0.1:7701 apply -f examples/agent.yaml  # replicas: -1
+bin/bubectl --server 127.0.0.1:7702 get deploy     # any node has the full state
+bin/bubectl --server 127.0.0.1:7703 dump           # whole desired state as YAML
+bin/bubectl --server 127.0.0.1:7701 delete web
+```
+
+Kill a node and its replicas are rescheduled onto the survivors — placement is a
+pure function of the alive set, so every node agrees without electing a leader.
+`scripts/demo.sh` runs this whole scenario (join, deploy, daemonset, dump, node
+failure + reschedule, delete) end to end.
+
+For TLS: `examples/gen-certs.sh certs n1 n2 n3` writes a CA and per-node certs;
+start each node with `--certs certs/<name>`, and pass `--certs certs/<name>` to
+`bubectl` too.
+
+## bubectl
+
+```
+bubectl apply -f FILE          define or update resources
+bubectl get [nodes|deploy|static|all]
+bubectl delete NAME
+bubectl dump                   whole-cluster desired state as YAML
+```
+
+The server address is read from `--server IP:PORT`, `$BUBE_SERVER`, or
+`.bube/config` (a line `server: 127.0.0.1:7701`).
+
+## Manifests
+
+```yaml
+kind: Deploy        # Node | Static | Deploy
+name: web
+replicas: 3         # -1 every node (daemonset), 1 single, N copies
+image: ./bin/workload   # a path to ingest, or a 64-hex image hash
+argv: [--serve, web]
+```
+
+The manifest directory is the only storage there is: a file means the resource
+should exist, removing it retracts the resource from the whole cluster. See
+`examples/` for Deploy, DaemonSet (`replicas: -1`) and Static manifests.
+
+## Repository layout
+
+```
+src/        the daemon and client (docs/DESIGN.md has the file-by-file map)
+examples/   sample workload, manifests, cert generator
+scripts/    demo.sh — a scripted 3-node scenario
+docs/       DESIGN.md — architecture and an honest list of simplifications
+```
+
+See **docs/DESIGN.md** for how each idea above maps to the code, and for what is
+fully implemented versus deliberately simplified.

@@ -21,5 +21,16 @@ void     ResDelete(res_t *in);
 
 const void *RespGetValuePtr(resp_t *r);
 
-
 #endif
+
+/* 
+Membership state -> replicates
+Membership state -> replicates
+Runtime state -> live within the node
+
+
+https://en.wikipedia.org/wiki/SWIM_Protocol
+https://en.wikipedia.org/wiki/Conflict-free_replicated_data_type
+https://en.wikipedia.org/wiki/Mainline_DHT
+https://en.wikipedia.org/wiki/Gossip_protocol
+*/
