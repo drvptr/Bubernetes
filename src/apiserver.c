@@ -1,4 +1,5 @@
 #include "apiserver.h"
+#include "sha256.h"
 #include "util.h"
 
 #include <stdlib.h>
@@ -240,6 +241,85 @@ int ResHas(res_t *r, int noun)
     return r->f[noun].set;
 }
 
+void ResClear(res_t *r, int noun)
+{
+    if (r == NULL || noun < 0 || noun >= NOUN__COUNT)
+        return;
+    if (!r->f[noun].set)
+        return;
+    field_clear(&r->f[noun]);
+    notify(r, noun);
+}
+
+void ResComputeId(int kind, const char *name, size_t nlen,
+                  unsigned char out[RES_ID_LEN])
+{
+    struct sha256 s;
+    sha256_init(&s);
+    const char *kn = KindName(kind);
+    sha256_update(&s, kn, strlen(kn));
+    sha256_update(&s, "/", 1);
+    sha256_update(&s, name, nlen);
+    sha256_final(&s, out);
+}
+
+int ResNameValid(const char *name, size_t nlen)
+{
+    if (name == NULL || nlen == 0 || nlen > 63)
+        return 0;
+    for (size_t i = 0; i < nlen; i++) {
+        char c = name[i];
+        int ok = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+                 (c >= '0' && c <= '9') || c == '.' || c == '-' || c == '_';
+        if (!ok)
+            return 0;
+    }
+    return 1;
+}
+
+int ResSpecValid(res_t *r, const char **why)
+{
+    const char *reason = NULL;
+
+    int kind = (int)ResGetInt(r, NOUN_KIND);
+    size_t nlen;
+    const char *name = ResGetBytes(r, NOUN_NAME, &nlen);
+
+    if (!ResHas(r, NOUN_KIND) || (kind != KIND_STATIC && kind != KIND_DEPLOY))
+        reason = "kind must be Static or Deploy";
+    else if (!ResNameValid(name, nlen))
+        reason = "name must be 1..63 chars of [A-Za-z0-9._-]";
+    else if (ResHas(r, NOUN_REPLICAS)) {
+        int64_t rep = ResGetInt(r, NOUN_REPLICAS);
+        if (rep < -1 || rep > RES_MAX_REPLICAS)
+            reason = "replicas must be -1 or 0..65535";
+    }
+    if (reason == NULL && ResHas(r, NOUN_IMAGE)) {
+        size_t il;
+        ResGetBytes(r, NOUN_IMAGE, &il);
+        if (il != RES_ID_LEN)
+            reason = "image must be a 32-byte hash";
+    }
+    if (reason == NULL && ResHas(r, NOUN_ARGV)) {
+        size_t al;
+        const unsigned char *a = ResGetBytes(r, NOUN_ARGV, &al);
+        if (al == 0 || a[al - 1] != '\0')
+            reason = "argv must be NUL-terminated entries";
+    }
+    if (reason == NULL && ResHas(r, NOUN_ID)) {
+        size_t il;
+        const void *id = ResGetBytes(r, NOUN_ID, &il);
+        unsigned char want[RES_ID_LEN];
+        ResComputeId(kind, name, nlen, want);
+        if (il != RES_ID_LEN || memcmp(id, want, RES_ID_LEN) != 0)
+            reason = "id does not match kind/name";
+    }
+
+    if (why != NULL)
+        *why = reason;
+    return reason == NULL;
+}
+
 /* --------------------------------------------------------- resp values */
 
 int RespIsInt(const resp_t *v)
@@ -372,6 +452,31 @@ res_t *StoreGetName(const char *name)
     return NULL;
 }
 
+res_t *StoreFindDesired(const char *name, int kind, int *matches)
+{
+    size_t want = strlen(name);
+    res_t *found = NULL;
+    int n = 0;
+    for (size_t b = 0; b < STORE_BUCKETS; b++) {
+        for (res_t *r = g_buckets[b]; r != NULL; r = r->next) {
+            if (!ResIsDesired(r))
+                continue;
+            if (kind >= 0 && (int)ResGetInt(r, NOUN_KIND) != kind)
+                continue;
+            size_t len;
+            const void *nm = ResGetBytes(r, NOUN_NAME, &len);
+            if (nm != NULL && len == want && memcmp(nm, name, want) == 0) {
+                if (found == NULL)
+                    found = r;
+                n++;
+            }
+        }
+    }
+    if (matches != NULL)
+        *matches = n;
+    return found;
+}
+
 void StoreForEach(void (*fn)(res_t *r, void *ctx), void *ctx)
 {
     for (size_t b = 0; b < STORE_BUCKETS; b++) {
@@ -438,8 +543,12 @@ void DesiredFold(void (*fn)(res_t *r, void *acc), void *acc)
 void ResCopySpec(res_t *dst, res_t *src)
 {
     for (int n = 0; n < NOUN__COUNT; n++) {
-        if (!NounIsSpec(n) || !ResHas(src, n))
+        if (!NounIsSpec(n) || n == NOUN_ID)
             continue;
+        if (!ResHas(src, n)) {
+            ResClear(dst, n);       /* absent in the newer spec: gone here too */
+            continue;
+        }
         resp_t *v = ResGet(src, n);
         ResSet(dst, n, v);
         RespFree(v);

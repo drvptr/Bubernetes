@@ -33,6 +33,12 @@ int  blob_ingest_file(const char *path, unsigned char hash[SHA256_LEN]);
 /* drop a blob we no longer need (no workload references the hash). */
 void blob_drop(const unsigned char hash[SHA256_LEN]);
 
+/* garbage collection: drop every blob for which keep() returns 0. The daemon
+ * passes a predicate that says "some desired resource still names this hash",
+ * so an image lives exactly as long as something in the cluster wants it. */
+void blob_sweep(int (*keep)(const unsigned char hash[SHA256_LEN], void *ctx),
+                void *ctx);
+
 size_t blob_count(void);
 
 #endif

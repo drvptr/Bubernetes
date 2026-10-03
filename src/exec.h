@@ -20,8 +20,10 @@
  *   3. exec_reap() collects children that have exited, so the reconciler can
  *      update runtime state and decide whether to replace them.
  *
- * Only statically linked images work, by design: there is no filesystem for a
- * dynamic loader to find libraries in, and that is the point.
+ * Images are expected to be statically linked. Nothing stops a dynamic binary
+ * from exec'ing if the host happens to have its loader and libraries, but then
+ * the workload depends on the node's filesystem - exactly the coupling this
+ * design refuses to manage. Ship static images and the node can be anything.
  */
 
 /* build an anonymous in-memory executable from image bytes. Returns an fd to

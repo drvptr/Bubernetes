@@ -246,11 +246,27 @@ int wire_accept(int lfd, struct conn *out)
         return -1;
     set_timeouts(fd);
     out->fd = fd;
-    if (tls_server_handshake(out) != 0) {
-        wire_close(out);
-        return -1;
-    }
     return 0;
+}
+
+int wire_accept_handshake(struct conn *c)
+{
+    return tls_server_handshake(c);
+}
+
+size_t wire_max_payload(int type)
+{
+    switch (type) {
+    case MSG_APPLY:         /* carries an executable image */
+    case MSG_BLOB_RESP:
+        return MAX_MSG;
+    case MSG_GOSSIP_SYN:    /* whole desired state: hashes, not images */
+    case MSG_GOSSIP_ACK:
+    case MSG_LIST_RESP:
+        return 16u * 1024u * 1024u;
+    default:                /* a request, a name, a hash, a status byte */
+        return 1u * 1024u * 1024u;
+    }
 }
 
 int wire_connect(const char *ip, int port, const char *server_name,
@@ -306,6 +322,8 @@ int wire_recv(struct conn *c, int *type, struct buf *payload)
         return -1;
     *type = hdr[4];
     size_t len = total - 1;
+    if (len > wire_max_payload(*type))
+        return -1;      /* this message type never needs that much */
     buf_reset(payload);
     buf_reserve(payload, len);
     if (len > 0 && conn_read(c, payload->data, len) != 0)

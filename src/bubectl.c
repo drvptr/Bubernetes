@@ -100,6 +100,16 @@ static int apply_emit(const struct manifest *m, void *ctx)
     int kind = KindFromName(m->kind);
     if (kind < 0)
         return 0;
+    if (!ResNameValid(m->name, strlen(m->name))) {
+        fprintf(stderr, "skipping '%s': name must be 1..63 chars of [A-Za-z0-9._-]\n",
+                m->name);
+        return 0;
+    }
+    if (m->has_replicas && (m->replicas < -1 || m->replicas > RES_MAX_REPLICAS)) {
+        fprintf(stderr, "skipping '%s': replicas must be -1 or 0..%d\n",
+                m->name, RES_MAX_REPLICAS);
+        return 0;
+    }
 
     res_t *spec = ResCreate();
     unsigned char id[SHA256_LEN];
@@ -290,6 +300,7 @@ static int cmd_dump(void)
     return 0;
 }
 
+/* name is "web" or "Deploy/web" when the bare name is ambiguous across kinds */
 static int cmd_delete(const char *name)
 {
     int rtype = 0;
@@ -297,13 +308,23 @@ static int cmd_delete(const char *name)
     buf_init(&reply);
     int rc = wire_call(g_ip, g_port, "", MSG_DELETE, name, strlen(name),
                        &rtype, &reply);
-    if (rc == 0 && rtype == MSG_DELETE_RESP && reply.len >= 1 &&
-        reply.data[0] == W_OK)
-        printf("deleted '%s'\n", name);
-    else
-        fprintf(stderr, "could not delete '%s' (not found?)\n", name);
+    int st = W_ERR;
+    if (rc == 0 && rtype == MSG_DELETE_RESP && reply.len >= 1)
+        st = reply.data[0];
     buf_free(&reply);
-    return 0;
+
+    if (st == W_OK) {
+        printf("deleted '%s'\n", name);
+        return 0;
+    }
+    if (st == W_AMBIGUOUS)
+        fprintf(stderr, "'%s' names more than one resource; use Kind/name "
+                        "(e.g. Deploy/%s)\n", name, name);
+    else if (st == W_NOTFOUND)
+        fprintf(stderr, "no Static or Deploy resource named '%s'\n", name);
+    else
+        fprintf(stderr, "could not delete '%s'\n", name);
+    return 1;
 }
 
 static void usage(const char *p)
@@ -312,7 +333,7 @@ static void usage(const char *p)
         "usage:\n"
         "  %s apply -f FILE\n"
         "  %s get [nodes|deploy|static|all]\n"
-        "  %s delete NAME\n"
+        "  %s delete NAME | Kind/NAME\n"
         "  %s dump\n"
         "server is read from .bube/config or $BUBE_SERVER (ip:port)\n",
         p, p, p, p);

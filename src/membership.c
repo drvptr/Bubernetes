@@ -137,8 +137,9 @@ static int mem_merge(const char *name, const char *ip, int udp, int tcp,
         return 1;
     }
 
-    /* keep the freshest address we have seen */
-    if (ip[0] != '\0') {
+    /* take a new address only from a fact at least as fresh as what we hold;
+     * a stale or forged rumour must not be able to redirect a member */
+    if (ip[0] != '\0' && inc >= m->incarnation) {
         snprintf(m->ip, sizeof m->ip, "%s", ip);
         if (udp > 0) m->udp_port = udp;
         if (tcp > 0) m->tcp_port = tcp;
@@ -192,8 +193,11 @@ static void put_one_update(struct buf *b, const char *name, const char *ip,
     buf_append_u16(b, (uint16_t)tcp);
 }
 
-/* glue a rotating sample of what we know onto the packet, so facts spread */
-static void put_updates(struct buf *b)
+/* glue a rotating sample of what we know onto the packet, so facts spread.
+ * `about` names the packet's destination, if it is a member: its own entry
+ * always rides along, so a node we hold as suspect hears that and can refute
+ * it at once instead of waiting for the rotating sample to come round. */
+static void put_updates(struct buf *b, const char *about)
 {
     uint16_t n = 0;
     size_t slots = g_len + 1;        /* +1 for self */
@@ -210,10 +214,19 @@ static void put_updates(struct buf *b)
                    M_ALIVE, g_self_inc);
     n++;
 
+    struct member *dest = NULL;
+    if (about != NULL && about[0] != '\0')
+        dest = mem_find(about);
+    if (dest != NULL) {
+        put_one_update(b, dest->name, dest->ip, dest->udp_port, dest->tcp_port,
+                       dest->state, dest->incarnation);
+        n++;
+    }
+
     for (size_t i = 0; i + 1 < budget && g_len > 0; i++) {
         g_diss_cursor = (g_diss_cursor + 1) % (int)g_len;
         struct member *m = &g_mem[g_diss_cursor];
-        if (!m->used)
+        if (!m->used || m == dest)
             continue;
         put_one_update(b, m->name, m->ip, m->udp_port, m->tcp_port,
                        m->state, m->incarnation);
@@ -235,17 +248,20 @@ static void send_to(int fd, const char *ip, int udp, struct buf *b)
     sendto(fd, b->data, b->len, 0, (struct sockaddr *)&sa, sizeof sa);
 }
 
-static void send_ping(int fd, const char *ip, int udp, uint32_t seq, int type)
+/* `to_name` is the destination's member name ("" for a bare seed address) */
+static void send_ping(int fd, const char *to_name, const char *ip, int udp,
+                      uint32_t seq, int type)
 {
     struct buf b;
     buf_init(&b);
     put_header(&b, type, seq);
-    put_updates(&b);
+    put_updates(&b, to_name);
     send_to(fd, ip, udp, &b);
     buf_free(&b);
 }
 
-static void send_pingreq(int fd, const char *relay_ip, int relay_udp,
+static void send_pingreq(int fd, const char *relay_name,
+                         const char *relay_ip, int relay_udp,
                          const char *tname, const char *tip, int tudp,
                          uint32_t oseq)
 {
@@ -257,7 +273,7 @@ static void send_pingreq(int fd, const char *relay_ip, int relay_udp,
     buf_append_u16(&b, (uint16_t)strlen(tip));
     buf_append_str(&b, tip);
     buf_append_u16(&b, (uint16_t)tudp);
-    put_updates(&b);
+    put_updates(&b, relay_name);
     send_to(fd, relay_ip, relay_udp, &b);
     buf_free(&b);
 }
@@ -291,6 +307,12 @@ static void read_updates(struct rdr *rd)
         int tcp = rd_u16(rd);
         if (rd->err || nm == NULL || ip == NULL)
             break;
+        /* a state we do not know would be a member that is never alive, never
+         * suspect and never dead - and so never escalated or reaped. Drop it. */
+        if (state < M_ALIVE || state > M_DEAD)
+            continue;
+        if (nl == 0 || nl >= MAXN)
+            continue;
         char name[MAXN], ipbuf[64];
         snprintf(name, sizeof name, "%.*s", (int)nl, nm);
         snprintf(ipbuf, sizeof ipbuf, "%.*s", (int)il, ip);
@@ -319,6 +341,8 @@ static void handle_one(int fd, const unsigned char *pkt, size_t len,
     uint64_t finc = rd_u64(&rd);
     if (rd.err || nm == NULL || ip == NULL)
         return;
+    if (nl == 0 || nl >= MAXN)
+        return;
 
     char from[MAXN], fip[64];
     snprintf(from, sizeof from, "%.*s", (int)nl, nm);
@@ -331,7 +355,7 @@ static void handle_one(int fd, const unsigned char *pkt, size_t len,
 
     if (type == SW_PING) {
         read_updates(&rd);
-        send_ping(fd, fip, fudp, seq, SW_ACK);
+        send_ping(fd, from, fip, fudp, seq, SW_ACK);
         return;
     }
 
@@ -348,7 +372,7 @@ static void handle_one(int fd, const unsigned char *pkt, size_t len,
                 struct buf b;
                 buf_init(&b);
                 put_header(&b, SW_ACK, g_fwd[i].oseq);
-                put_updates(&b);
+                put_updates(&b, NULL);
                 send_to(fd, g_fwd[i].oip, g_fwd[i].oport, &b);
                 buf_free(&b);
                 g_fwd[i].used = 0;
@@ -381,8 +405,7 @@ static void handle_one(int fd, const unsigned char *pkt, size_t len,
         f->oport = fudp;
         f->oseq = seq;
         f->ts = monotime_ms();
-        send_ping(fd, tipbuf, tudp, f->relay_seq, SW_PING);
-        (void)tname;
+        send_ping(fd, tname, tipbuf, tudp, f->relay_seq, SW_PING);
         return;
     }
 }
@@ -441,7 +464,7 @@ static void start_probe(int fd)
     g_probe_phase = 0;
     g_probe_sent = monotime_ms();
     g_probe_active = 1;
-    send_ping(fd, g_probe_ip, g_probe_udp, g_probe_seq, SW_PING);
+    send_ping(fd, g_probe_name, g_probe_ip, g_probe_udp, g_probe_seq, SW_PING);
 }
 
 static void begin_indirect(int fd)
@@ -453,7 +476,7 @@ static void begin_indirect(int fd)
             continue;
         if (g_probe_name[0] != '\0' && strcmp(m->name, g_probe_name) == 0)
             continue;
-        send_pingreq(fd, m->ip, m->udp_port,
+        send_pingreq(fd, m->name, m->ip, m->udp_port,
                      g_probe_name[0] ? g_probe_name : "?",
                      g_probe_ip, g_probe_udp, g_probe_seq);
         sent++;

@@ -111,6 +111,10 @@ int tls_server_handshake(struct conn *c)
     if (g_ctx == NULL)
         return 0;           /* TLS compiled in but not configured: plain */
     SSL *ssl = SSL_new(g_ctx);
+    if (ssl == NULL) {
+        log_ssl_error("SSL_new");
+        return -1;
+    }
     SSL_set_fd(ssl, c->fd);
     if (SSL_accept(ssl) != 1) {
         log_ssl_error("SSL_accept");
@@ -126,6 +130,10 @@ int tls_client_handshake(struct conn *c, const char *server_name)
     if (g_ctx == NULL)
         return 0;
     SSL *ssl = SSL_new(g_ctx);
+    if (ssl == NULL) {
+        log_ssl_error("SSL_new");
+        return -1;
+    }
     SSL_set_fd(ssl, c->fd);
     if (server_name != NULL && server_name[0] != '\0') {
         SSL_set_tlsext_host_name(ssl, server_name);

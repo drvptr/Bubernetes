@@ -39,7 +39,7 @@ enum {
 enum { V_GET = 1, V_SET, V_WATCH, V_LIST, V_CREATE, V_DELETE };
 
 /* response status codes */
-enum { W_OK = 0, W_NOTFOUND = 1, W_ERR = 2 };
+enum { W_OK = 0, W_NOTFOUND = 1, W_ERR = 2, W_AMBIGUOUS = 3 };
 
 /* ---- generic resource codec -------------------------------------------
  * One codec for every message that carries a resource. It walks nouns, not
@@ -75,11 +75,17 @@ struct conn {
 };
 
 int  wire_listen(const char *ip, int port);          /* -> listen fd, or -1 */
-int  wire_accept(int lfd, struct conn *out);          /* 0 ok, -1 err */
+/* accept a connection (no TLS yet, so this never blocks on the peer) ... */
+int  wire_accept(int lfd, struct conn *out);          /* 0 ok, -1 err/EAGAIN */
+/* ... then complete the server side of the handshake, off the event loop */
+int  wire_accept_handshake(struct conn *c);           /* 0 ok, -1 err */
 int  wire_connect(const char *ip, int port, const char *server_name,
                   struct conn *out);                  /* 0 ok, -1 err */
 int  wire_send(struct conn *c, int type, const void *payload, size_t len);
+/* reads one frame; refuses a payload larger than wire_max_payload(type) so a
+ * hostile header cannot make us allocate for a message that type never needs */
 int  wire_recv(struct conn *c, int *type, struct buf *payload);
+size_t wire_max_payload(int type);
 void wire_close(struct conn *c);
 
 /* one request, one response, over a fresh connection. Blocking; used by the

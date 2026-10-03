@@ -24,14 +24,18 @@ static char *trim(char *s)
     return s;
 }
 
-/* cut a line at the first '#' that is not inside quotes */
+/* cut a line at the first '#' that is not inside quotes. Tracks which quote
+ * opened, so an apostrophe inside "..." does not end the quoted span. */
 static void strip_comment(char *s)
 {
-    int q = 0;
+    char q = 0;
     for (; *s != '\0'; s++) {
-        if (*s == '"' || *s == '\'')
-            q = !q;
-        else if (*s == '#' && !q) {
+        if (q != 0) {
+            if (*s == q)
+                q = 0;
+        } else if (*s == '"' || *s == '\'') {
+            q = *s;
+        } else if (*s == '#') {
             *s = '\0';
             return;
         }
@@ -59,6 +63,9 @@ static void manifest_clear(struct manifest *m)
     m->image[0] = '\0';
     buf_reset(&m->argv);
     m->argc = 0;
+    m->has_version = 0;
+    m->version = 0;
+    m->origin[0] = '\0';
 }
 
 static void argv_add(struct manifest *m, const char *item)
@@ -75,6 +82,8 @@ static int manifest_valid(const struct manifest *m)
         return 0;
     if (KindFromName(m->kind) < 0)
         return 0;
+    if (m->has_version && m->origin[0] == '\0')
+        return 0;       /* state needs its author; otherwise it is not state */
     return 1;
 }
 
@@ -90,6 +99,11 @@ static void set_scalar(struct manifest *m, const char *key, char *val)
     } else if (strcmp(key, "replicas") == 0) {
         m->has_replicas = 1;
         m->replicas = strtol(val, NULL, 10);
+    } else if (strcmp(key, "version") == 0) {
+        m->has_version = 1;
+        m->version = strtoull(val, NULL, 10);
+    } else if (strcmp(key, "origin") == 0) {
+        snprintf(m->origin, sizeof m->origin, "%s", val);
     } else if (strcmp(key, "argv") == 0) {
         /* empty here means a block list follows; handled by the caller */
     } else {
@@ -97,20 +111,36 @@ static void set_scalar(struct manifest *m, const char *key, char *val)
     }
 }
 
-/* parse an inline list body (without the brackets) into argv */
+/* split an inline list body (without the brackets) into argv, honouring
+ * quotes: a comma inside "..." or '...' does not separate items */
 static void parse_inline_list(struct manifest *m, char *body)
 {
     char *p = body;
     while (*p != '\0') {
-        char *comma = strchr(p, ',');
-        if (comma != NULL)
-            *comma = '\0';
-        char *item = unquote(trim(p));
-        if (*item != '\0')
+        /* find the end of this item: the next comma outside quotes */
+        char *q = p;
+        char quote = 0;
+        while (*q != '\0') {
+            if (quote != 0) {
+                if (*q == quote)
+                    quote = 0;
+            } else if (*q == '"' || *q == '\'') {
+                quote = *q;
+            } else if (*q == ',') {
+                break;
+            }
+            q++;
+        }
+        int more = (*q == ',');
+        *q = '\0';
+        char *tok = trim(p);
+        int was_quoted = strlen(tok) >= 2 && (tok[0] == '"' || tok[0] == '\'');
+        char *item = unquote(tok);
+        if (*item != '\0' || was_quoted)      /* "" is a real, empty argument */
             argv_add(m, item);
-        if (comma == NULL)
+        if (!more)
             break;
-        p = comma + 1;
+        p = q + 1;
     }
 }
 
@@ -158,8 +188,7 @@ int manifest_parse(const char *text, size_t len,
         if (t[0] == '-' && (t[1] == ' ' || t[1] == '\0')) {
             if (in_argv_list) {
                 char *item = unquote(trim(t + 1));
-                if (*item != '\0')
-                    argv_add(&m, item);
+                argv_add(&m, item);
             }
             continue;
         }
@@ -199,7 +228,7 @@ done:
     return rc;
 }
 
-/* ----------------------------------------------------------- directory scan */
+/* ----------------------------------------------------------- directory */
 
 static int read_file(const char *path, struct buf *out)
 {
@@ -211,8 +240,9 @@ static int read_file(const char *path, struct buf *out)
     size_t r;
     while ((r = fread(tmp, 1, sizeof tmp, f)) > 0)
         buf_append(out, tmp, r);
+    int err = ferror(f);
     fclose(f);
-    return 0;
+    return err ? -1 : 0;
 }
 
 static int has_suffix(const char *s, const char *suf)
@@ -221,38 +251,65 @@ static int has_suffix(const char *s, const char *suf)
     return ls >= lf && strcmp(s + ls - lf, suf) == 0;
 }
 
-int manifest_scan_dir(const char *dir,
-                      int (*emit)(const struct manifest *m, void *ctx), void *ctx)
+int manifest_list_dir(const char *dir,
+                      void (*cb)(const char *fname, const unsigned char *data,
+                                 size_t len, void *ctx),
+                      void *ctx)
 {
     DIR *d = opendir(dir);
     if (d == NULL) {
-        if (errno != ENOENT)
-            PERR("opendir %s", dir);
+        PERR("opendir %s", dir);
         return -1;
     }
     struct buf content;
     buf_init(&content);
-    int rc = 0;
     struct dirent *de;
     while ((de = readdir(d)) != NULL) {
+        if (de->d_name[0] == '.')
+            continue;       /* hidden: our own .lamport, editor temp files */
         if (!has_suffix(de->d_name, ".yaml") && !has_suffix(de->d_name, ".yml"))
             continue;
         char path[2048];
         snprintf(path, sizeof path, "%s/%s", dir, de->d_name);
         if (read_file(path, &content) != 0) {
             PERR("read %s", path);
+            cb(de->d_name, NULL, 0, ctx);
             continue;
         }
-        rc = manifest_parse((const char *)content.data, content.len, emit, ctx);
-        if (rc != 0)
-            break;
+        cb(de->d_name, content.data, content.len, ctx);
     }
     buf_free(&content);
     closedir(d);
-    return rc;
+    return 0;
 }
 
 /* ----------------------------------------------------------- yaml dump */
+
+static int needs_quotes(const char *s, size_t n)
+{
+    if (n == 0)
+        return 1;
+    for (size_t i = 0; i < n; i++) {
+        char c = s[i];
+        if (c == ' ' || c == ',' || c == '#' || c == '[' || c == ']' ||
+            c == '"' || c == '\'' || c == ':' || c == '\t')
+            return 1;
+    }
+    return 0;
+}
+
+static void append_item(struct buf *out, const char *s, size_t n)
+{
+    if (!needs_quotes(s, n)) {
+        buf_append(out, s, n);
+        return;
+    }
+    /* prefer double quotes; fall back to single if the item has a double */
+    char q = memchr(s, '"', n) != NULL ? '\'' : '"';
+    buf_append_byte(out, (unsigned char)q);
+    buf_append(out, s, n);
+    buf_append_byte(out, (unsigned char)q);
+}
 
 void manifest_dump_res(struct buf *out, res_t *r)
 {
@@ -279,13 +336,11 @@ void manifest_dump_res(struct buf *out, res_t *r)
 
     size_t ilen;
     const unsigned char *img = ResGetBytes(r, NOUN_IMAGE, &ilen);
-    if (img != NULL && ilen > 0) {
+    if (img != NULL && ilen == SHA256_LEN) {
         char hex[2 * SHA256_LEN + 1];
-        if (ilen == SHA256_LEN) {
-            hex_encode(hex, img, ilen);
-            snprintf(line, sizeof line, "image: %s\n", hex);
-            buf_append_str(out, line);
-        }
+        hex_encode(hex, img, ilen);
+        snprintf(line, sizeof line, "image: %s\n", hex);
+        buf_append_str(out, line);
     }
 
     size_t alen;
@@ -300,18 +355,20 @@ void manifest_dump_res(struct buf *out, res_t *r)
             if (!first)
                 buf_append_str(out, ", ");
             first = 0;
-            /* quote if it contains a space or comma */
-            if (memchr(item, ' ', ilen2) != NULL ||
-                memchr(item, ',', ilen2) != NULL) {
-                buf_append_byte(out, '"');
-                buf_append(out, item, ilen2);
-                buf_append_byte(out, '"');
-            } else {
-                buf_append(out, item, ilen2);
-            }
+            append_item(out, item, ilen2);
             off += ilen2 + 1;
         }
         buf_append_str(out, "]\n");
+    }
+
+    /* state carries its clock; an edit written by hand never has these */
+    if (ResHas(r, NOUN_VERSION) && ResHas(r, NOUN_ORIGIN)) {
+        size_t olen;
+        const char *origin = ResGetBytes(r, NOUN_ORIGIN, &olen);
+        snprintf(line, sizeof line, "version: %llu\norigin: %.*s\n",
+                 (unsigned long long)ResGetInt(r, NOUN_VERSION),
+                 (int)olen, origin);
+        buf_append_str(out, line);
     }
 }
 

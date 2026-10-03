@@ -118,6 +118,24 @@ void    ResSetInt(res_t *r, int noun, int64_t x);
 const void *ResGetBytes(res_t *r, int noun, size_t *len);  /* NULL if unset */
 void    ResSetBytes(res_t *r, int noun, const void *p, size_t n);
 int     ResHas(res_t *r, int noun);                    /* is the noun set?  */
+void    ResClear(res_t *r, int noun);                  /* unset the noun    */
+
+/* identity and validation shared by every path that creates a resource (the
+ * manifest loader, bubectl apply, gossip) so they can never disagree:
+ *   id   = sha256("<Kind>/<name>"), always SHA256_LEN bytes
+ *   name = 1..63 chars of [A-Za-z0-9._-], like a DNS label */
+#define RES_ID_LEN 32
+void    ResComputeId(int kind, const char *name, size_t nlen,
+                     unsigned char out[RES_ID_LEN]);
+int     ResNameValid(const char *name, size_t nlen);
+
+/* is this a well-formed spec we are willing to store and act on? Checks kind
+ * (Static/Deploy only), name, replicas range (-1 .. RES_MAX_REPLICAS), image
+ * length and a NUL-terminated argv. On failure *why names the problem. Every
+ * entry point (loader, apply, gossip) runs this, so nothing malformed can reach
+ * the scheduler or the reconciler whichever way it arrived. */
+#define RES_MAX_REPLICAS 65535
+int     ResSpecValid(res_t *r, const char **why);
 
 /* ------------------------------------------------------- response values
  *
@@ -142,7 +160,11 @@ void          RespFree(resp_t *v);
  */
 res_t *StoreCreate(const void *id, size_t idlen);   /* create + insert; or existing */
 res_t *StoreGet(const void *id, size_t idlen);
-res_t *StoreGetName(const char *name);              /* convenience for bubectl */
+res_t *StoreGetName(const char *name);              /* first match, any kind */
+/* find a desired (Static/Deploy) resource by name; kind == -1 means any desired
+ * kind. *matches receives how many desired resources carry that name, so a
+ * caller can refuse to act on an ambiguous one. */
+res_t *StoreFindDesired(const char *name, int kind, int *matches);
 void   StoreRemove(const void *id, size_t idlen);
 void   StoreForEach(void (*fn)(res_t *r, void *ctx), void *ctx);
 size_t StoreCount(void);
@@ -168,9 +190,10 @@ void DesiredFold(void (*fn)(res_t *r, void *acc), void *acc);
 /* true if the resource carries a spec that this node should act on */
 int ResIsDesired(res_t *r);
 
-/* copy only the spec nouns (the replicated desired state) from src to dst,
- * leaving dst's runtime nouns untouched. Used wherever a learned or applied
- * spec is merged onto a resource we already hold. */
+/* make dst's spec identical to src's: copy the spec nouns src has and clear the
+ * ones it lacks (except the id), leaving dst's runtime nouns untouched. Used
+ * wherever a learned or applied spec is merged onto a resource we already hold.
+ * Clearing matters: a manifest that drops `argv:` must drop it everywhere. */
 void ResCopySpec(res_t *dst, res_t *src);
 
 #endif

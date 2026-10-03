@@ -97,6 +97,22 @@ void blob_drop(const unsigned char hash[SHA256_LEN])
     e->used = 0;
 }
 
+void blob_sweep(int (*keep)(const unsigned char hash[SHA256_LEN], void *ctx),
+                void *ctx)
+{
+    for (size_t i = 0; i < g_len; i++) {
+        struct entry *e = &g_tab[i];
+        if (!e->used)
+            continue;
+        if (keep(e->hash, ctx))
+            continue;
+        free(e->data);
+        e->data = NULL;
+        e->len = 0;
+        e->used = 0;
+    }
+}
+
 size_t blob_count(void)
 {
     size_t n = 0;

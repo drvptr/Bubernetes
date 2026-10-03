@@ -13,11 +13,22 @@
  * gaps. That is what makes `bubectl dump > all.yaml` and dropping the file onto
  * a fresh node's directory a complete, if blunt, backup and restore.
  *
+ * Two kinds of document live in the directory and the loader tells them apart
+ * by one key:
+ *
+ *   - an EDIT: a document without `version:`. Written by a human or dropped in
+ *     by bubectl. When its file's content changes the loader authors a new
+ *     version of the resource.
+ *   - STATE: a document with `version:` and `origin:`. Written by bubelet to
+ *     persist what the cluster agreed on (and by `bubectl dump`). Loaded with
+ *     exactly that version, under the same last-writer-wins rules as gossip, so
+ *     a restart restores the state as it was instead of re-authoring it.
+ *
  * The parser is intentionally a small subset: `---` document separators,
  * `key: value` scalars, `# comments`, and lists in either `[a, b]` or block
- * `- a` form. Enough for the schema below, nothing more. (libyaml would drop in
- * here if the schema ever outgrew this, but the whole point is that it should
- * not.)
+ * `- a` form, with "double" or 'single' quotes around an item that holds a
+ * space, comma, `#` or bracket. (libyaml would drop in here if the schema ever
+ * outgrew this, but the whole point is that it should not.)
  *
  *     kind: Deploy          # Node | Static | Deploy
  *     name: web
@@ -34,6 +45,9 @@ struct manifest {
     char image[1024];        /* raw: a path to ingest, or a hex hash */
     struct buf argv;         /* NUL-separated argv entries (no program name) */
     int  argc;
+    int  has_version;        /* present => this document is persisted STATE */
+    unsigned long long version;
+    char origin[128];
 };
 
 /* parse a buffer; emit() is called once per document. emit returns 0 to
@@ -42,11 +56,17 @@ struct manifest {
 int manifest_parse(const char *text, size_t len,
                    int (*emit)(const struct manifest *m, void *ctx), void *ctx);
 
-/* scan a directory for *.yaml / *.yml and parse each. Same emit contract. */
-int manifest_scan_dir(const char *dir,
-                      int (*emit)(const struct manifest *m, void *ctx), void *ctx);
+/* list the *.yaml / *.yml files of a directory, handing each one's name and
+ * full content to cb. Returns 0 if the directory was read completely, -1 if it
+ * could not be opened - callers must not treat a failed listing as "the files
+ * are gone". A file that cannot be read is reported with data == NULL. */
+int manifest_list_dir(const char *dir,
+                      void (*cb)(const char *fname, const unsigned char *data,
+                                 size_t len, void *ctx),
+                      void *ctx);
 
-/* serialise one resource's spec as a single YAML document (leading `---`). */
+/* serialise one resource's spec as a single YAML document (leading `---`).
+ * Includes version/origin when the resource has them, i.e. produces STATE. */
 void manifest_dump_res(struct buf *out, res_t *r);
 
 /* inotify on the directory. Returns a watch fd for the event loop, or -1. */

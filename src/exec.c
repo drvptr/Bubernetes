@@ -38,19 +38,41 @@ int exec_memfd(const char *name, const void *image, size_t len)
 
 pid_t exec_spawn(int memfd, char *const argv[], char *const envp[])
 {
+    pid_t parent = getpid();
     pid_t pid = fork();
     if (pid < 0) {
         PERR("fork");
         return -1;
     }
     if (pid == 0) {
-        /* child: become the workload. fexecve maps the memfd as the new image;
-         * nothing of the workload ever touched the filesystem. */
-        /* if our bubelet dies, we should not outlive it as an orphan */
+        /*
+         * Child. We are the one thread of a fresh copy of a multithreaded
+         * process, so until exec only async-signal-safe calls are allowed:
+         * no malloc, no stdio, no logging.
+         *
+         * bubelet blocks SIGINT/SIGTERM/SIGCHLD to route them through signalfd,
+         * and the signal mask survives both fork and exec. Without this reset
+         * the workload would start with SIGTERM blocked and could never be
+         * stopped - it would just accumulate a pending SIGTERM forever.
+         */
+        sigset_t none;
+        sigemptyset(&none);
+        sigprocmask(SIG_SETMASK, &none, NULL);
+
+        /* if our bubelet dies, we should not outlive it as an orphan. The
+         * getppid() check closes the window where the parent died between
+         * fork and prctl (the death signal would never have been sent). */
         prctl(PR_SET_PDEATHSIG, SIGTERM);
+        if (getppid() != parent)
+            _exit(127);
+
+        /* become the workload. fexecve maps the memfd as the new image;
+         * nothing of the workload ever touched the filesystem. */
         fexecve(memfd, argv, envp);
-        /* only reached if exec failed */
-        bube_log("ERR ", "exec_spawn/child", errno, "fexecve");
+
+        /* only reached if exec failed; stay async-signal-safe */
+        static const char msg[] = "bubelet: fexecve failed in child\n";
+        if (write(2, msg, sizeof msg - 1) < 0) { /* nothing to do */ }
         _exit(127);
     }
     return pid;

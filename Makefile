@@ -8,6 +8,10 @@
 #   make TLS=1        same, but node-to-node traffic is mutual-auth TLS (OpenSSL)
 #   make examples     build the sample static workload
 #   make clean
+#
+# Plain and TLS builds keep separate object directories, so switching between
+# them never links a stale object compiled for the other mode. Both write their
+# binaries to bin/; the last build wins there.
 
 CC      ?= cc
 CFLAGS  ?= -std=c11 -O2 -Wall -Wextra -pthread
@@ -15,7 +19,17 @@ LDFLAGS ?= -static -pthread
 
 SRC := src
 BIN := bin
-OBJ := build
+
+ifdef TLS
+OBJ    := build/tls
+CFLAGS += -DBUBE_TLS
+LDLIBS += -lssl -lcrypto -lpthread -ldl
+else
+OBJ    := build/plain
+endif
+
+# header dependencies, generated as a side effect of compiling
+CFLAGS += -MMD -MP
 
 CORE := \
 	$(OBJ)/util.o $(OBJ)/sha256.o $(OBJ)/apiserver.o $(OBJ)/wire.o \
@@ -26,11 +40,6 @@ CORE := \
 CTL := \
 	$(OBJ)/util.o $(OBJ)/sha256.o $(OBJ)/apiserver.o $(OBJ)/wire.o \
 	$(OBJ)/tls.o $(OBJ)/manifest.o
-
-ifdef TLS
-CFLAGS += -DBUBE_TLS
-LDLIBS += -lssl -lcrypto -lpthread -ldl
-endif
 
 .PHONY: all examples clean
 all: $(BIN)/bubelet $(BIN)/bubectl
@@ -54,4 +63,6 @@ $(OBJ):
 	mkdir -p $(OBJ)
 
 clean:
-	rm -rf $(OBJ) $(BIN)
+	rm -rf build $(BIN)
+
+-include $(wildcard $(OBJ)/*.d)

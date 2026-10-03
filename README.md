@@ -108,9 +108,13 @@ should exist, removing it retracts the resource from the whole cluster. See
 ```
 src/        the daemon and client (docs/DESIGN.md has the file-by-file map)
 examples/   sample workload, manifests, cert generator
-scripts/    demo.sh — a scripted 3-node scenario
-docs/       DESIGN.md — architecture and an honest list of simplifications
+scripts/    demo.sh — a scripted, asserted 3-node scenario
+tests/      run.sh — in-process decoder/validator tests under AddressSanitizer
+docs/       DESIGN.md — architecture and simplifications
+            AUDIT.md  — the code review and what each finding's fix was
 ```
 
-See **docs/DESIGN.md** for how each idea above maps to the code, and for what is
-fully implemented versus deliberately simplified.
+See **docs/DESIGN.md** for how each idea above maps to the code and what is
+deliberately simplified, and **docs/AUDIT.md** for the review pass and fixes.
+`bash tests/run.sh` runs the sanitizer tests; `bash scripts/demo.sh` runs the
+full cluster scenario with assertions.
