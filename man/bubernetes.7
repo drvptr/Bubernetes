@@ -1,0 +1,290 @@
+.TH BUBERNETES 7 "October 2026" "Bubernetes" "Miscellaneous Information Manual"
+.SH NAME
+bubernetes \- a peer-to-peer process orchestrator for native Linux processes
+.SH DESCRIPTION
+Bubernetes runs processes across a cluster of machines. Every machine runs one
+daemon,
+.BR bubelet (8),
+and nothing else: there is no control plane, no master, no database and no
+container runtime. All nodes are equal, each holds a full copy of the cluster's
+desired state, and each independently decides which processes it should be
+running. A node can die and come back, or be replaced by another machine
+carrying its name, without the cluster losing what it was asked to run.
+.PP
+Workloads are statically linked executables. Their bytes are shipped between
+nodes by content (a sha256 hash), written into an anonymous in-memory file with
+.BR memfd_create (2)
+and started with
+.BR fexecve (3),
+so a workload never has to exist on a node's disk. Several replicas started from
+one image share its read-only code pages.
+.PP
+Bubernetes orchestrates
+.I processes.
+It does not provide a network between them, does not route user traffic to
+them, and does not manage the files they read: those belong to the environment,
+which may be bare metal, a virtual machine, or a container. See
+.B INGRESS
+below.
+.SH CONCEPTS
+.TP
+.B Node
+A member of the cluster, identified by its
+.I name
+(the identity; defaults to the hostname) and reachable at an
+.I address
+(which may change). Membership is maintained by a SWIM-style failure detector
+over UDP: a node that stops answering is
+.IR Unhealthy ,
+then
+.IR Unreachable ,
+and its share of the work moves to the others.
+.TP
+.B Resource
+Everything the cluster knows about is a resource: a node, a workload. A
+resource is reached only through a small set of properties
+.RI ( nouns :
+name, kind, replicas, image, argv, status, ...) and a small set of operations
+.RI ( verbs :
+get, set, list, create, delete) \(em the same set locally and over the network.
+.TP
+.B Kind
+There are three.
+.B Deploy
+is a scheduled workload;
+.B Static
+is a process pinned to the node whose manifest directory declared it, never
+scheduled elsewhere;
+.B Node
+is a member. Behaviour that other systems spend separate kinds on is expressed
+through
+.B replicas
+on a Deploy:
+.B 1
+is a single process,
+.B N
+is N copies spread over the cluster, and
+.B \-1
+is one on every node (a daemonset).
+.TP
+.B Desired state
+The set of resources that should exist. It is owned by nobody: every node holds
+a replica and they converge by gossip (anti-entropy), with conflicts settled by
+a Lamport version and the author's name. Deleting a resource leaves a tombstone
+so it cannot be resurrected by a node that had not yet heard.
+.TP
+.B Placement
+A pure function of the resource's id and the set of live nodes (rendezvous
+hashing). Every node computes it independently and reaches the same answer, so
+there is no scheduler process and nothing to elect. Adding or removing a node
+moves only the resources whose winning node changed.
+.TP
+.B Image
+The sha256 of the executable's bytes. A manifest may name a path; the path is
+read once (by
+.BR bubectl (1)
+on apply, or by
+.BR bubelet (8)
+for a file in its manifest directory) and from then on the cluster refers to the
+image only by hash. A node that needs an image it does not hold fetches it from
+any peer that has it.
+.SH THE MANIFEST DIRECTORY
+.I /etc/bubernetes/manifests
+(or whatever
+.B \-\-manifests
+names) is the only thing
+.BR bubelet (8)
+reads from disk and the only place desired state is kept. Two kinds of file live
+there, told apart by a single key:
+.TP
+.B Edit files
+Any
+.I *.yaml
+or
+.I *.yml
+written by an operator (or dropped in by
+.BR bubectl ).
+A document without
+.B version:
+is an edit. Creating or changing the file authors a new version of the
+resource; removing the file retracts the resource from the whole cluster. The
+daemon never writes to these files. A file is re-read only when its bytes
+change, so an unchanged file never overrides what the cluster has since agreed
+on.
+.TP
+.B State files
+.IR name .state.yaml,
+written by the daemon. A document with
+.B version:
+and
+.B origin:
+is state: what the cluster agreed on, at that version. On restart they are
+reloaded at exactly that version under the same last-writer-wins rules as
+gossip, so the node resumes instead of re-editing. Do not hand-edit them;
+removing one retracts nothing (it is a mirror, not a source).
+.PP
+Also present:
+.TP
+.B .scan
+Content hashes of the edit files as last seen, so that after a restart an
+unchanged file is known to be unchanged.
+.TP
+.B .lamport
+The node's Lamport clock, so a restarted node resumes past everything it ever
+authored.
+.PP
+.B bubectl dump
+prints the whole cluster's desired state as state documents. Written into a
+fresh node's manifest directory, it restores the cluster's view there with
+nothing to reconcile.
+.SH MANIFEST FORMAT
+A small YAML subset:
+.B \-\-\-
+separates documents,
+.B key: value
+scalars,
+.B #
+comments, and lists as
+.B [a, b]
+or block
+.BR "\- a" .
+Quote an item that contains a space, comma, hash or bracket.
+.PP
+.nf
+kind: Deploy        # Node | Static | Deploy
+name: web           # 1..63 chars of [A-Za-z0-9._-]; the identity
+replicas: 3         # -1 every node, 1 single, N copies (Deploy only)
+image: /usr/local/bin/nginx   # a path to read, or a 64-hex image hash
+argv: [-g, "daemon off;"]     # arguments; argv[0] is set to the name
+.fi
+.PP
+A relative
+.B image:
+path in a file inside the manifest directory is resolved against that
+directory; on
+.B bubectl apply
+it is resolved against the current directory of
+.BR bubectl .
+.SH A WORKLOAD MUST STAY IN THE FOREGROUND
+Bubernetes supervises the process it started. A program that forks and lets
+its original process exit \(em the classic daemon \(em looks to the daemon like
+a workload that died a few milliseconds after starting, and it will be
+restarted, while the real daemon runs on unsupervised and the restarts fail to
+bind the port it already holds. The following manifest is therefore wrong:
+.PP
+.nf
+kind: Deploy
+name: web
+replicas: 1
+image: /usr/local/bin/nginx
+.fi
+.PP
+and produces a log like
+.PP
+.nf
+started 'web' replica 0 pid 12921
+nginx: [emerg] bind() to 0.0.0.0:80 failed (98: Address already in use)
+pid 12921 exited after 31ms (exit 0), crash 1; next start in 2s
+.fi
+.PP
+with the resource shown as
+.B Unhealthy
+and restarts backing off. This one is right:
+.PP
+.nf
+kind: Deploy
+name: web
+replicas: 1
+image: /usr/local/bin/nginx
+argv: [-g, "daemon off;"]
+.fi
+.PP
+Every daemon has such a switch (nginx
+.BR "daemon off;" ,
+sshd
+.BR \-D ,
+postgres is foreground by default, ...). The rule is the same as under
+.BR systemd (1)
+with
+.BR Type=simple :
+the process the supervisor started is the process it supervises.
+.SH CONFIGURATION
+.BR bubelet (8)
+takes everything on its command line; there is no daemon configuration file.
+A first node:
+.PP
+.nf
+bubelet --name node-a --bind 10.0.0.7 --port 7700
+.fi
+.PP
+A node joining it:
+.PP
+.nf
+bubelet --name node-b --bind 10.0.0.161 --port 7700 --seed 10.0.0.7:7700
+.fi
+.PP
+.B \-\-bind
+is both where the node listens and the address it tells peers to reach it at,
+so it must be an address the other nodes can route to. One
+.B \-\-port
+serves both the UDP membership protocol and the TCP wire; a firewall between
+nodes must pass both protocols on it.
+.PP
+.BR bubectl (1)
+reads the node to talk to from, in rising priority,
+.IR ~/.bube/config ,
+.IR ./.bube/config ,
+.BR $BUBE_SERVER ,
+and
+.BR \-\-server :
+.PP
+.nf
+$ cat ~/.bube/config
+server: 10.0.0.7:7700
+.fi
+.PP
+Any node will do: every node holds the whole desired state.
+.SH SECURITY
+Built plain, the TCP wire is cleartext and unauthenticated: anyone who can reach
+a node's port can define workloads on the cluster. Run plain clusters only on a
+network you trust.
+.PP
+Built with
+.BR "make TLS=1" ,
+the TCP wire is mutual-authentication TLS: each node presents a certificate
+signed by the cluster CA and demands one from every peer and from
+.BR bubectl .
+Membership in the cluster is then "holds a certificate signed by the cluster
+CA", which is also what lets a replacement machine assume a node's identity.
+.I examples/gen-certs.sh
+issues a CA and per-node certificates. TLS is all-or-nothing per cluster. The UDP
+membership protocol is not encrypted in either build; it carries liveness only.
+.SH INGRESS
+Bubernetes keeps the right processes running on the right nodes; it does not
+decide which node a user's packet reaches. That is a separate layer:
+.BR keepalived (8)
+or a local load balancer for failover within one site (VRRP works only inside
+one layer-2 segment), and DNS-based or anycast steering between sites. The
+cluster's view of which nodes are alive and which workloads are ready is
+available from
+.BR "bubectl get" ,
+and is the natural input to such a layer.
+.SH FILES
+.TP
+.I /etc/bubernetes/manifests
+The manifest directory; see above.
+.TP
+.I ~/.bube/config
+.BR bubectl (1)
+configuration.
+.SH SEE ALSO
+.BR bubelet (8),
+.BR bubectl (1),
+.BR memfd_create (2),
+.BR fexecve (3)
+.PP
+The project's
+.I docs/DESIGN.md
+explains how each idea maps to the code, and
+.I docs/AUDIT.md
+records the review it went through.

@@ -1,0 +1,149 @@
+.TH BUBELET 8 "October 2026" "Bubernetes" "System Administration"
+.SH NAME
+bubelet \- the Bubernetes node daemon
+.SH SYNOPSIS
+.B bubelet
+.RB [ \-\-name
+.IR NAME ]
+.RB [ \-\-bind
+.IR IP ]
+.RB [ \-\-port
+.IR PORT ]
+.RB [ \-\-manifests
+.IR DIR ]
+.RB [ \-\-seed
+.IR IP:PORT "]..."
+.RB [ \-\-certs
+.IR DIR ]
+.SH DESCRIPTION
+.B bubelet
+is the whole of a Bubernetes node. Every machine in the cluster runs one, and
+nothing else: it maintains membership, replicates the desired state, decides
+which workloads this node should run, and runs them. There are no other
+components. See
+.BR bubernetes (7)
+for the model.
+.PP
+On start it reads its manifest directory, contacts any
+.B \-\-seed
+nodes to join the cluster, and from then on keeps the processes it is
+responsible for running: starting missing replicas, stopping surplus ones,
+restarting ones that exit, and fetching from a peer any workload image it does
+not yet hold.
+.SH OPTIONS
+.TP
+.BI \-\-name " NAME"
+The node's identity in the cluster. Defaults to the hostname. Must be 1..63
+characters of
+.BR [A-Za-z0-9._-] .
+A name must be unique and should be stable across restarts; a new machine that
+starts with an existing node's name
+.I is
+that node as far as the cluster is concerned.
+.TP
+.BI \-\-bind " IP"
+The IPv4 address to listen on. This is also the address announced to peers as
+the way to reach this node, so it must be routable from the other nodes.
+Default
+.BR 127.0.0.1 ,
+which is only useful for a single-machine cluster.
+.TP
+.BI \-\-port " PORT"
+One port, used for both the UDP membership protocol and the TCP wire. Default
+.BR 7700 .
+.TP
+.BI \-\-manifests " DIR"
+The manifest directory, the node's only storage. Created if missing. Default
+.IR /etc/bubernetes/manifests .
+.TP
+.BI \-\-seed " IP:PORT"
+A node already in the cluster, to join through. May be repeated. The first node
+of a cluster needs none. Joining does not require TLS.
+.TP
+.BI \-\-certs " DIR"
+Enable mutual TLS on the TCP wire using
+.IR DIR/ca.pem ,
+.I DIR/node.pem
+and
+.IR DIR/node.key .
+Only available when built with
+.BR "make TLS=1" ;
+ignored otherwise.
+.SH WORKLOAD ENVIRONMENT
+A replica is started with
+.I argv[0]
+set to the resource name followed by the manifest's
+.BR argv ,
+and the environment
+.TP
+.B BUBE_NAME
+the resource name
+.TP
+.B BUBE_NODE
+this node's name
+.TP
+.B BUBE_REPLICA
+the replica's index on this node
+.TP
+.B PATH
+.I /usr/bin:/bin
+.PP
+Its standard output and error are those of
+.BR bubelet .
+It is sent
+.B SIGTERM
+when it should stop and
+.B SIGKILL
+if it has not exited five seconds later, and it receives
+.B SIGTERM
+automatically if
+.B bubelet
+itself dies. A replica that exits within ten seconds of starting is treated as
+a crash and its restarts back off exponentially (2s, 4s, ... 60s) while the
+resource shows
+.BR Unhealthy ;
+a daemon that forks and leaves triggers exactly this (see
+.BR bubernetes (7)).
+.SH SIGNALS
+.B SIGTERM
+and
+.B SIGINT
+stop the daemon: every workload it started is sent
+.B SIGTERM
+and reaped before it exits.
+.SH FILES
+.TP
+.I /etc/bubernetes/manifests/
+edit files, state files,
+.IR .scan ,
+.IR .lamport ;
+see
+.BR bubernetes (7).
+.SH EXIT STATUS
+0 on a clean stop, 1 if it could not bind its sockets or set up TLS, 2 on a
+usage error.
+.SH EXAMPLES
+The first node of a cluster, listening on its LAN address:
+.PP
+.nf
+# bubelet --bind 10.0.0.7
+.fi
+.PP
+A second machine joining it:
+.PP
+.nf
+# bubelet --bind 10.0.0.161 --seed 10.0.0.7:7700
+.fi
+.PP
+Both with mutual TLS, after
+.B examples/gen-certs.sh certs node-a node-b
+(the certificate names must match
+.BR \-\-name ):
+.PP
+.nf
+# bubelet --name node-a --bind 10.0.0.7   --certs certs/node-a
+# bubelet --name node-b --bind 10.0.0.161 --certs certs/node-b --seed 10.0.0.7:7700
+.fi
+.SH SEE ALSO
+.BR bubernetes (7),
+.BR bubectl (1)

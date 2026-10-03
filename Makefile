@@ -7,6 +7,8 @@
 #   make              build bubelet, bubectl (static, cleartext transport)
 #   make TLS=1        same, but node-to-node traffic is mutual-auth TLS (OpenSSL)
 #   make examples     build the sample static workload
+#   make install      binaries to $(PREFIX)/bin, man pages to $(PREFIX)/share/man
+#   make uninstall
 #   make clean
 #
 # Plain and TLS builds keep separate object directories, so switching between
@@ -16,6 +18,8 @@
 CC      ?= cc
 CFLAGS  ?= -std=c11 -O2 -Wall -Wextra -pthread
 LDFLAGS ?= -static -pthread
+PREFIX  ?= /usr/local
+MANDIR  ?= $(PREFIX)/share/man
 
 SRC := src
 BIN := bin
@@ -41,8 +45,22 @@ CTL := \
 	$(OBJ)/util.o $(OBJ)/sha256.o $(OBJ)/apiserver.o $(OBJ)/wire.o \
 	$(OBJ)/tls.o $(OBJ)/manifest.o
 
-.PHONY: all examples clean
+.PHONY: all examples install uninstall clean
 all: $(BIN)/bubelet $(BIN)/bubectl
+
+install: all
+	install -d $(DESTDIR)$(PREFIX)/bin
+	install -m 0755 $(BIN)/bubelet $(BIN)/bubectl $(DESTDIR)$(PREFIX)/bin/
+	install -d $(DESTDIR)$(MANDIR)/man1 $(DESTDIR)$(MANDIR)/man7 $(DESTDIR)$(MANDIR)/man8
+	install -m 0644 man/bubectl.1    $(DESTDIR)$(MANDIR)/man1/
+	install -m 0644 man/bubernetes.7 $(DESTDIR)$(MANDIR)/man7/
+	install -m 0644 man/bubelet.8    $(DESTDIR)$(MANDIR)/man8/
+	@echo "installed to $(DESTDIR)$(PREFIX); try: man bubernetes"
+
+uninstall:
+	rm -f $(DESTDIR)$(PREFIX)/bin/bubelet $(DESTDIR)$(PREFIX)/bin/bubectl
+	rm -f $(DESTDIR)$(MANDIR)/man1/bubectl.1 $(DESTDIR)$(MANDIR)/man7/bubernetes.7 \
+	      $(DESTDIR)$(MANDIR)/man8/bubelet.8
 
 $(BIN)/bubelet: $(CORE) $(OBJ)/bubelet.o | $(BIN)
 	$(CC) $(LDFLAGS) -o $@ $^ $(LDLIBS)

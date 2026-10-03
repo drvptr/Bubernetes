@@ -1,0 +1,139 @@
+.TH BUBECTL 1 "October 2026" "Bubernetes" "User Commands"
+.SH NAME
+bubectl \- control a Bubernetes cluster
+.SH SYNOPSIS
+.B bubectl
+.RI [ options ]
+.B apply \-f
+.I FILE
+.br
+.B bubectl
+.RI [ options ]
+.B get
+.RB [ nodes | deploy | static | all ]
+.br
+.B bubectl
+.RI [ options ]
+.B delete
+.IR NAME | Kind/NAME
+.br
+.B bubectl
+.RI [ options ]
+.B dump
+.SH DESCRIPTION
+.B bubectl
+talks to one node of a Bubernetes cluster over the same wire protocol the nodes
+use among themselves. Any node will do: every node holds the whole desired
+state, and a change made through one reaches the others by gossip. See
+.BR bubernetes (7)
+for the model.
+.SH COMMANDS
+.TP
+.BI "apply \-f " FILE
+Define or update the resources described in
+.IR FILE ,
+a manifest of one or more documents. For each document whose
+.B image:
+is a path,
+.B bubectl
+reads the executable and sends its bytes along with the specification, so the
+cluster holds the image from then on; the path need not exist on any node.
+Applying a document whose resource already exists with the same specification
+changes nothing.
+.TP
+.BR "get " [ nodes | deploy | static | all ]
+List resources. With no argument, workloads (Static and Deploy);
+.B nodes
+lists members with their state and address. Columns:
+.B REPL
+is the desired replica count
+.RB ( all
+for a daemonset),
+.B STATUS
+and
+.B RUNNING
+are the answering node's own view (how many replicas
+.I it
+runs), and
+.B NODE/ORIGIN
+is the member address, or for a workload the node that last edited it and the
+version.
+.TP
+.BI "delete " NAME
+Retract a workload from the whole cluster: its replicas are stopped everywhere
+and a tombstone prevents it coming back. If both a Static and a Deploy carry
+the name, give
+.IR Kind/NAME ,
+e.g.
+.BR Deploy/web .
+A resource defined by an edit file in a node's manifest directory comes back
+if that file is edited again; remove the file to delete it for good.
+.TP
+.B dump
+Print the cluster's whole desired state as a manifest of state documents
+(with
+.B version:
+and
+.BR origin: ).
+Redirect it to a file to take a backup; place that file in a fresh node's
+manifest directory to restore the cluster's view there.
+.SH OPTIONS
+Options may appear anywhere on the command line.
+.TP
+.BI \-\-server " IP" [ :PORT ]
+The node to talk to. The port defaults to 7700.
+.TP
+.BI \-\-certs " DIR"
+Present the client certificate in
+.I DIR
+(the same layout as
+.BR bubelet (8)'s
+.BR \-\-certs )
+to a cluster built with TLS. Required for such a cluster; harmless otherwise.
+.TP
+.BR \-h ", " \-\-help
+Print usage.
+.SH CONFIGURATION
+The server is read, in rising priority, from
+.IR ~/.bube/config ,
+.IR ./.bube/config ,
+the environment variable
+.BR BUBE_SERVER ,
+and
+.BR \-\-server .
+The file holds a single line:
+.PP
+.nf
+server: 10.0.0.7:7700
+.fi
+.SH EXIT STATUS
+0 on success, 1 if the node could not be reached or the request was refused,
+2 on a usage error.
+.SH EXAMPLES
+.nf
+$ bubectl --server 10.0.0.7 get nodes
+NAME       KIND   REPL  STATUS  RUNNING  NODE/ORIGIN
+node-a     Node   -     Ready   -        10.0.0.7:7700
+node-b     Node   -     Ready   -        10.0.0.161:7700
+
+$ cat web.yaml
+kind: Deploy
+name: web
+replicas: -1
+image: /usr/local/bin/nginx
+argv: [-g, "daemon off;"]
+
+$ bubectl apply -f web.yaml
+applied Deploy 'web' (replicas=-1)
+
+$ bubectl get
+NAME   KIND    REPL  STATUS  RUNNING  NODE/ORIGIN
+web    Deploy  all   Ready   1        @node-a v2
+
+$ bubectl dump > backup.yaml
+$ bubectl delete web
+deleted 'web'
+.fi
+.SH SEE ALSO
+.BR bubernetes (7),
+.BR bubelet (8)

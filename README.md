@@ -43,78 +43,155 @@ make TLS=1           # node-to-node traffic over static mutual-auth TLS (OpenSSL
 Everything lands in `bin/`. The only external dependency is libc (and OpenSSL
 when `TLS=1`), both linked statically.
 
-## Running a local cluster
+## Running
 
-Each node needs a name, a port (used for both SWIM/UDP and the TCP wire), and a
-manifest directory. Nodes after the first take a `--seed` to join.
+Two hosts, `10.0.0.7` and `10.0.0.161`, no shared storage, no container
+runtime, no cluster network. One of them is where you work.
 
-```sh
-make examples
-bin/bubelet --name n1 --port 7701 --manifests /tmp/n1 &
-bin/bubelet --name n2 --port 7702 --manifests /tmp/n2 --seed 127.0.0.1:7701 &
-bin/bubelet --name n3 --port 7703 --manifests /tmp/n3 --seed 127.0.0.1:7701 &
-
-bin/bubectl --server 127.0.0.1:7701 get nodes
-```
-
-Point an `image:` at the built workload (an absolute path, or one relative to
-where bubelet runs), then:
+**1. Build nginx statically** (on the working host). Bubernetes ships the
+executable's bytes between nodes and runs them from memory, so the binary
+must carry everything it needs:
 
 ```sh
-bin/bubectl --server 127.0.0.1:7701 apply -f examples/web.yaml    # replicas: 3
-bin/bubectl --server 127.0.0.1:7701 apply -f examples/agent.yaml  # replicas: -1
-bin/bubectl --server 127.0.0.1:7702 get deploy     # any node has the full state
-bin/bubectl --server 127.0.0.1:7703 dump           # whole desired state as YAML
-bin/bubectl --server 127.0.0.1:7701 delete web
+apt install build-essential libpcre2-dev zlib1g-dev git
+git clone https://github.com/nginx/nginx && cd nginx
+./auto/configure --with-cc-opt="-static" --with-ld-opt="-static"
+make
+file objs/nginx          # must say: statically linked
+install objs/nginx /usr/local/bin/nginx
 ```
 
-Kill a node and its replicas are rescheduled onto the survivors — placement is a
-pure function of the alive set, so every node agrees without electing a leader.
-`scripts/demo.sh` runs this whole scenario (join, deploy, daemonset, dump, node
-failure + reschedule, delete) end to end.
+**2. Give nginx an environment on each host.** The orchestrator runs the
+process; what the process reads is the environment's job. nginx wants a config
+and a place for logs, and here each host also gets its own `index.html` so you
+can see which one answered:
 
-For TLS: `examples/gen-certs.sh certs n1 n2 n3` writes a CA and per-node certs;
-start each node with `--certs certs/<name>`, and pass `--certs certs/<name>` to
-`bubectl` too.
+```sh
+mkdir -p /usr/local/nginx/conf /usr/local/nginx/logs
+cat > /usr/local/nginx/conf/nginx.conf <<'EOF'
+worker_processes 1;
+events { worker_connections 1024; }
+http {
+    default_type text/html;
+    server {
+        listen 80;
+        location / { root /; index index.html; }
+    }
+}
+EOF
+echo "Hello from $(hostname)" > /index.html
 
-## bubectl
-
+ssh root@10.0.0.161 'mkdir -p /usr/local/nginx/conf /usr/local/nginx/logs; echo "Hello from $(hostname)" > /index.html'
+scp /usr/local/nginx/conf/nginx.conf root@10.0.0.161:/usr/local/nginx/conf/
 ```
-bubectl apply -f FILE          define or update resources
-bubectl get [nodes|deploy|static|all]
-bubectl delete NAME
-bubectl dump                   whole-cluster desired state as YAML
+
+Nothing about nginx itself is copied to the second host.
+
+**3. Install Bubernetes on both hosts:**
+
+```sh
+git clone https://github.com/drvptr/Bubernetes && cd Bubernetes
+make && make install
+scp bin/bubelet bin/bubectl root@10.0.0.161:/usr/local/bin/
 ```
 
-The server address is read from `--server IP:PORT`, `$BUBE_SERVER`, or
-`.bube/config` (a line `server: 127.0.0.1:7701`).
+**4. Start a node on each host.** `--bind` is both where a node listens and
+the address it tells the others to reach it at, so it must be the host's
+routable address. One port carries both the UDP membership protocol and the
+TCP wire; open both on any firewall between the hosts. The node's name
+defaults to its hostname.
 
-## Manifests
+```sh
+bubelet --bind 10.0.0.7 &
+ssh root@10.0.0.161 'bubelet --bind 10.0.0.161 --seed 10.0.0.7:7700 &'
+```
 
-```yaml
-kind: Deploy        # Node | Static | Deploy
+That `--seed` is the whole join procedure. No TLS is needed for it; TLS is a
+separate, optional layer on the TCP wire (see below).
+
+**5. Point bubectl at any node** — every node holds the whole desired state:
+
+```sh
+mkdir -p ~/.bube && echo 'server: 10.0.0.7' > ~/.bube/config
+bubectl get nodes
+NAME             KIND     REPL  STATUS       RUNNING  NODE/ORIGIN
+node1            Node     -     Ready        -        10.0.0.161:7700
+node2            Node     -     Ready        -        10.0.0.7:7700
+```
+
+**6. Deploy.** `replicas: -1` means one on every node, now and whenever a node
+joins. The `argv` matters — see the next section.
+
+```sh
+cat > web.yaml <<'EOF'
+kind: Deploy
 name: web
-replicas: 3         # -1 every node (daemonset), 1 single, N copies
-image: ./bin/workload   # a path to ingest, or a 64-hex image hash
-argv: [--serve, web]
+replicas: -1
+image: /usr/local/bin/nginx
+argv: [-g, "daemon off;"]
+EOF
+
+bubectl apply -f web.yaml
+applied Deploy 'web' (replicas=-1)
+
+bubectl get
+NAME             KIND     REPL  STATUS       RUNNING  NODE/ORIGIN
+web              Deploy   all   Ready        1        @node2 v2
+
+curl http://10.0.0.7/      # Hello from node2
+curl http://10.0.0.161/    # Hello from node1
 ```
 
-The manifest directory is the only storage there is: a file means the resource
-should exist, removing it retracts the resource from the whole cluster. See
-`examples/` for Deploy, DaemonSet (`replicas: -1`) and Static manifests.
+What happened: `bubectl` read `/usr/local/bin/nginx`, sent its bytes to
+`10.0.0.7` with the spec, and from then on the cluster knows the image only by
+its sha256. `10.0.0.161` learned the spec by gossip, had no image with that
+hash, fetched the bytes from its peer, wrote them into an anonymous memory file
+and `fexecve`'d it. nginx on the second host never touched its disk — delete
+`/usr/local/bin/nginx` there and re-apply; it still serves.
 
-## Repository layout
+Scale it, retract it:
+
+```sh
+sed -i 's/replicas: -1/replicas: 1/' web.yaml && bubectl apply -f web.yaml   # one copy, placed by hash
+bubectl dump > all.yaml       # the whole cluster's desired state, with versions
+bubectl delete web            # stopped on every node, tombstoned so it stays gone
+```
+
+Instead of `bubectl apply`, a manifest can simply be placed in a node's
+`/etc/bubernetes/manifests/` (and removed to retract it); that directory *is*
+the storage.
+
+## Conclusion
+
+Bubernetes supervises the process it started. A daemon that forks and lets its
+original process exit looks like a workload that died a few milliseconds after
+starting: it gets restarted, the restart fails to bind the port the real daemon
+already holds, and the resource shows `Unhealthy` with restarts backing off:
 
 ```
-src/        the daemon and client (docs/DESIGN.md has the file-by-file map)
-examples/   sample workload, manifests, cert generator
-scripts/    demo.sh — a scripted, asserted 3-node scenario
-tests/      run.sh — in-process decoder/validator tests under AddressSanitizer
-docs/       DESIGN.md — architecture and simplifications
-            AUDIT.md  — the code review and what each finding's fix was
+started 'web' replica 0 pid 12921
+nginx: [emerg] bind() to 0.0.0.0:80 failed (98: Address already in use)
+pid 12921 exited after 31ms (exit 0), crash 1; next start in 2s
 ```
 
-See **docs/DESIGN.md** for how each idea above maps to the code and what is
-deliberately simplified, and **docs/AUDIT.md** for the review pass and fixes.
-`bash tests/run.sh` runs the sanitizer tests; `bash scripts/demo.sh` runs the
-full cluster scenario with assertions.
+That is the manifest without `argv: [-g, "daemon off;"]`. Every daemon has
+such a switch; the rule is the same as `systemd`'s `Type=simple`: the process
+the supervisor started is the process it supervise
+
+---
+
+## TLS
+
+```sh
+make TLS=1
+examples/gen-certs.sh certs node1 node2      # a CA and a cert per node name
+bubelet --name node2 --bind 10.0.0.7   --certs certs/node2
+bubelet --name node1 --bind 10.0.0.161 --certs certs/node1 --seed 10.0.0.7:7700
+bubectl --certs certs/node2 get nodes
+```
+
+Mutual authentication on the TCP wire: a node (or `bubectl`) without a cert
+signed by the cluster CA is refused. All-or-nothing per cluster. Built plain,
+the wire is cleartext and anyone who can reach a node's port can define
+workloads — use plain clusters on trusted networks only.
+
