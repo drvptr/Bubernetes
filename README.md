@@ -12,7 +12,7 @@ A typical Kubernetes cluster consists of multiple independent components:  API S
 
 Bubernetes is designed as a **peer-to-peer cluster**. Each node participates in cluster coordination, stores cluster state **in memory** (without etcd or other databases), schedules workloads, executes processes, exchanges state with other peers. Instead of separating "control" and "worker" nodes, the cluster forms a distributed quorum where every node has equal responsibility. The failure of a single node should not stop the cluster from operating.
 
-The only required component is: `bubelet`. It combines responsibilities similar to: Kubernetes API Server, Scheduler, kubelet, Controller Manager, basic load balancing. 
+Bubernetes definetly is **not** Kubernetes. The command syntax are intentionally inspired by Kubernetes because its CLI/API model is convenient. Architecturally, Bubernetes is some like to a combination of Kubernetes, Nomad, HashiCorp Serf, Nefele, Fleet. 
 
 Bubernetes is configured using YAML manifests. `bubelet` continuously watches a manifest directory, similar to how Kubernetes watches *static Pod* manifests. Unlike Kubernetes static Pods, however, the behavior is defined by the manifest itself.
 For example, a manifest may describre as a single local daemon and as a replicated deployment. The orchestrator determines how many instances should exist and where they should run.
@@ -26,6 +26,18 @@ One of the key goals of Bubernetes is to separate process orchestration from the
 Bubernetes is designed around a flat cluster topology where the cluster itself is the smallest logical unit of topology. Nodes are equal peers rather than members of a hierarchy, and a node is identified by a logical name and a current network address. The name represents the node's identity within the cluster, while the address is only a way to reach it and may change without changing the node's logical identity. This also means that a physical or virtual machine can be replaced without necessarily replacing the logical node: as long as the new machine assumes the same node identity and has valid credentials, the cluster can continue treating it as the same node.
 
 Bubernetes does not require a built-in hierarchy of masters, workers, regions, zones, or sub-clusters. Higher-level topology can instead be implemented externally when needed. For example, several independent Bubernetes clusters could be connected through an external load balancer or another routing mechanism and treated as larger logical units. This makes the cluster itself a composable building block, allowing a cluster of clusters to be constructed without introducing topology-specific concepts into the core orchestration model.
+
+ConfigMaps are not a Bubernetes object. Ansible can configure the node, install packages and libraries, distribute configuration files, create users and directories, install certificates, and prepare the environment before `bubelet` starts.
+
+Containerization is not required either. A container environment can be prepared separately with `runc run`, with its network connected to the cluster through an L2 bridge without NAT. Routing between networks can also be handled independently, for example with OSPF. From Bubernetes' point of view, the resulting container is still just a IP. The same workload can run directly on a physical machine, inside a VM, inside a container, on a BSD systems.
+
+At the same time, there is no fundamental reason why `bubelet` could not create such an environment itself. Its **API is essentially a remote interface for performing syscalls**. Since a process is already created through `execve()`, the same interface can be extended with operations such as `ulimit`/`setrlimit()`, `chroot()`, namespaces, signals, priorities, environment variables, and other process properties. A limited set of typed operations is preferable to exposing arbitrary syscalls directly. It means - you can set analog of `resource limit` by `ulimit` directly!
+
+Traffic balancing is **deliberately** outside of Bubernetes. Bubernetes balances workload placement, not user requests. If several nginx instances run on different nodes, HAProxy can balance traffic between them and perform *health checks* independently of the orchestrator.
+
+Monitoring follows the same principle. Prometheus can collect metrics from nodes and workloads, while Grafana and Alertmanager can provide visualization and alerting. Bubernetes only needs to expose the state required by these tools.
+
+The idea is to keep the orchestration layer small and compose it with existing Unix-like tools instead of implementing configuration management. **We can deploy the real KISS unix-way infrastructure with: bubernetes, ansible, runc, haproxy, keepalived, GeoDNS, Prometheus **
 
 ---
 
